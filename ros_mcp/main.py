@@ -16,7 +16,7 @@ from ros_mcp.utils.websocket import WebSocketManager
 # ROS bridge connection settings
 ROSBRIDGE_IP = "127.0.0.1"  # Default is localhost. Replace with your local IP or set using the LLM.
 ROSBRIDGE_PORT = (
-    9090  # Rosbridge default is 9090. Replace with your rosbridge port or set using the LLM.
+    9091  # Changed from 9090 [rosbridge default] since VS Code occupies that port.
 )
 
 # Initialize MCP server
