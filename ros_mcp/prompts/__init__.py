@@ -2,7 +2,7 @@
 
 Functions to register prompts with the MCP server instance.
 """
-
+# Images tool and robot-config tool not present here 
 from ros_mcp.prompts.test_actions_tools import register_test_actions_tools_prompts
 from ros_mcp.prompts.test_connection_tools import register_test_connection_tools_prompts
 from ros_mcp.prompts.test_nodes_tools import register_test_nodes_tools_prompts

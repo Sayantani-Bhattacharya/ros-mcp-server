@@ -72,6 +72,9 @@ def register_robot_config_tools(mcp: FastMCP, ws_manager: WebSocketManager) -> N
         """
         return get_verified_robots_list_util()
 
+
+    # Calls into the rosapi_types utility module to query rosbridge
+    # and return {version: "1" or "2", distro: "humble" / "noetic" / ...}.
     @mcp.tool(
         description="Detect the ROS version and distribution via rosbridge.",
         annotations=ToolAnnotations(

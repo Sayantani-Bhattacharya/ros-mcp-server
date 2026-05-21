@@ -1,4 +1,4 @@
-"""Action tools for ROS MCP."""
+"""Action tools for ROS MCP [Only for ROS 2]"""
 
 import asyncio
 import json
