@@ -61,6 +61,19 @@ to helper functions and standardizing tool patterns:
 
 **Title:** `send_action_goal` times out even when action succeeds
 
+### ROS Actions — conceptual background
+
+A ROS action is a three-phase async protocol built on top of ROS topics:
+```
+Client                    Action Server
+  |------ Goal --------->|   (start doing something)
+  |<----- Feedback ------| x N  (progress updates)
+  |<----- Result --------|   (final outcome)
+```
+rosbridge wraps this as `send_action_goal` / `action_feedback` / `action_result` WebSocket messages.
+
+**The critical property:** rosbridge tracks *which WebSocket connection* sent a goal and routes feedback/result back to that same connection. If the connection drops and reconnects, rosbridge forgets about the goal — the result message gets delivered to nobody.
+
 ### What happens
 ```
 send_action_goal('/turtle1/rotate_absolute', 'turtlesim/action/RotateAbsolute', {'theta': 1.0}, timeout=15)
@@ -82,6 +95,62 @@ But the MCP tool reports a timeout.
 ### Key insight
 A **timeout** (silence on the channel) and a **connection error** (broken socket) are two different things.
 The current code treats them identically — both trigger `self.close()`.
+
+### The buggy code
+
+`WebSocketManager.receive()` in `ros_mcp/utils/websocket.py`:
+```python
+def receive(self, timeout: float | None = None) -> Union[str, bytes] | None:
+    with self.lock:
+        self.connect()
+        if self.ws:
+            try:
+                self.ws.settimeout(actual_timeout)
+                raw = self.ws.recv()        # blocks until message or timeout
+                return raw
+            except Exception as e:          # catches EVERYTHING including timeout
+                self.close()               # ← kills the connection on timeout!
+                return None
+```
+
+The while loop in `send_action_goal` (`ros_mcp/tools/actions.py`):
+```python
+with ws_manager:                            # connection opens here
+    send_error = ws_manager.send(message)   # goal sent to rosbridge
+
+    while time.time() - start_time < timeout:
+        elapsed_time = time.time() - start_time
+        response = ws_manager.receive(timeout - elapsed_time)  # blocking
+
+        if response:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "action_result":
+                return {...}    # success path
+            if msg_data.get("op") == "action_feedback":
+                feedback_count += 1
+        else:
+            pass  # no message, continue
+
+        await asyncio.sleep(0.1)
+```
+
+### Step-by-step failure timeline
+
+| t (s) | Event |
+|-------|-------|
+| 0 | Goal sent. rosbridge registers client as subscriber for this action. |
+| 0.3 | `receive(15.0)` → feedback #1 arrives |
+| 0.6 | `receive(14.5)` → feedback #2 arrives |
+| 1.0 | `receive(14.0)` → feedback #3 arrives |
+| 1.4 | `receive(13.6)` → **no message for 13.6s** → `WebSocketTimeoutException` → `self.close()` called |
+| 1.4 | `receive()` returns `None`. Loop continues. |
+| 1.5 | Next `receive()` call → `connect()` opens a **new** WebSocket |
+| 10.0 | Robot finishes rotating. rosbridge sends `action_result` to the **old** (now dead) connection. |
+| 15.0 | While loop exits. Returns timeout error. |
+
+### Why `get_action_status` still shows success
+
+`get_action_status` subscribes to `{action_name}/_action/status` — an independent ROS topic that reflects the action server's internal state. It doesn't depend on having been the original goal sender. So it reads STATUS_SUCCEEDED = 4 regardless of whether the MCP connection was alive to receive the `action_result`.
 
 ### Why it works outside MCP's async runtime
 In a plain synchronous test the connection is steady and timing is predictable.
@@ -114,6 +183,8 @@ What it does NOT do:
 
 ### Fix A: Don't close on timeout (surgical)
 In `WebSocketManager.receive()`, stop treating TimeoutError as fatal:
+
+#### Pseudo Code
 ```python
 # current (buggy)
 except TimeoutError:
@@ -124,6 +195,32 @@ except TimeoutError:
 except TimeoutError:
     return None    # silence ≠ broken connection; stay connected
 ```
+
+#### Proposed Code
+
+catch `WebSocketTimeoutException` separately from real errors:
+
+```python
+import websocket  # websocket-client library
+
+def receive(self, timeout: float | None = None) -> Union[str, bytes] | None:
+    with self.lock:
+        self.connect()
+        if self.ws:
+            try:
+                actual_timeout = timeout if timeout is not None else self.default_timeout
+                self.ws.settimeout(actual_timeout)
+                raw = self.ws.recv()
+                return raw
+            except websocket.WebSocketTimeoutException:
+                # Timeout = no message arrived. Connection is still alive. Don't close it.
+                return None
+            except Exception as e:
+                # Real error (connection reset, etc.) — close and return None
+                print(f"[WebSocket] Receive error: {e}", file=sys.stderr)
+                self.close()
+                return None
+```
 All callers of `receive()` then need to handle `None` (continue the loop).
 
 **Concerns with Fix A:**
@@ -131,6 +228,10 @@ All callers of `receive()` then need to handle `None` (continue the loop).
 - Changes the caller contract: currently callers assume exception = broken, return = message
 - Need to audit every caller before applying
 - May mask a truly dead connection (silence vs broken can look the same)
+
+### Secondary issue: `with ws_manager:` closes on exit
+
+The `__exit__` method of `WebSocketManager` calls `self.close()`. The entire `send_action_goal` loop runs inside `with ws_manager:`, so the connection is kept alive for the duration of the function — this is fine. But it means the fix to `receive()` only helps if the `with ws_manager:` block isn't exited prematurely (e.g. on an early return path). Worth confirming all return paths are inside the block.
 
 ### Fix B: Restructure to a single long-lived receive (architectural)
 Instead of many `receive(timeout=0.5)` calls in a loop, pass the full remaining
@@ -147,6 +248,17 @@ Fix A is the right scope for this issue. But it needs:
 3. A regression test
 
 ---
+
+## What to Verify After the Fix
+
+1. `send_action_goal` with a short action (turtlesim rotate) returns `action_result` correctly
+2. `send_action_goal` with a longer action (feedback gap > `default_timeout`) still completes
+3. Real connection errors (rosbridge crashed mid-action) still close the connection
+4. Other tools using `receive()` in short request/reply patterns (e.g. `get_action_status`) still work — real errors still call `close()`
+
+## Files to Change
+
+- `ros_mcp/utils/websocket.py` — the `receive()` method (lines ~354–380)
 
 ## Open Questions
 
