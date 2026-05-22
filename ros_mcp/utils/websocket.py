@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import threading
+import time
 from typing import Union
 
 import cv2
@@ -310,7 +311,8 @@ class WebSocketManager:
                     url = f"ws://{self.ip}:{self.port}"
                     self.ws = websocket.create_connection(url, timeout=self.default_timeout)
                     print(
-                        f"[WebSocket] Connected ({self.default_timeout}s timeout)", file=sys.stderr
+                        f"[WebSocket {time.strftime('%H:%M:%S')}] Connected ({self.default_timeout}s timeout)",
+                        file=sys.stderr,
                     )
                     return None  # no error
                 except Exception as e:
@@ -366,15 +368,31 @@ class WebSocketManager:
             self.connect()
             if self.ws:
                 try:
-                    # Use default timeout if none specified
                     actual_timeout = timeout if timeout is not None else self.default_timeout
-                    print(f"[WebSocket] Using timeout of {actual_timeout} seconds", file=sys.stderr)
-                    # Temporarily set the receive timeout
+                    print(
+                        f"[WebSocket {time.strftime('%H:%M:%S')}] receive() waiting up to {actual_timeout:.2f}s",
+                        file=sys.stderr,
+                    )
                     self.ws.settimeout(actual_timeout)
-                    raw = self.ws.recv()  # rosbridge sends JSON as a string
+                    raw = self.ws.recv()
+                    print(
+                        f"[WebSocket {time.strftime('%H:%M:%S')}] message arrived ({len(raw) if raw else 0}b)",
+                        file=sys.stderr,
+                    )
                     return raw
+                except websocket.WebSocketTimeoutException:
+                    print(
+                        f"[WebSocket {time.strftime('%H:%M:%S')}] TIMEOUT — no message in {actual_timeout:.2f}s"
+                        " — closing connection",
+                        file=sys.stderr,
+                    )
+                    self.close()
+                    return None
                 except Exception as e:
-                    print(f"[WebSocket] Receive error or timeout: {e}", file=sys.stderr)
+                    print(
+                        f"[WebSocket {time.strftime('%H:%M:%S')}] receive error: {e} — closing connection",
+                        file=sys.stderr,
+                    )
                     self.close()
                     return None
             return None

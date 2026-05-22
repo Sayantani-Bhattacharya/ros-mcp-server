@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 
@@ -597,6 +598,8 @@ def register_action_tools(
 
         # Send the action goal through rosbridge
         with ws_manager:
+            _t0 = time.time()
+            print(f"[Action t+0.00s] Goal sent: {action_name}", file=sys.stderr)
             send_error = ws_manager.send(message)
             if send_error:
                 return {
@@ -611,10 +614,16 @@ def register_action_tools(
             last_feedback = None  # Store the last feedback message
             feedback_count = 0  # Count feedback messages received
 
+            # # Per-message window: give each receive() a fixed budget capped at
+            # # the remaining total, so gaps between feedback don't shrink the window.
+            # per_msg_timeout = ws_manager.default_timeout
+
             while time.time() - start_time < timeout:
                 elapsed_time = time.time() - start_time
 
                 response = ws_manager.receive(timeout - elapsed_time)
+                # remaining = timeout - (time.time() - start_time)
+                # response = ws_manager.receive(min(per_msg_timeout, remaining))
 
                 if response:
                     try:
@@ -622,6 +631,10 @@ def register_action_tools(
 
                         # Handle action_result messages (final completion)
                         if msg_data.get("op") == "action_result":
+                            print(
+                                f"[Action t+{time.time()-_t0:.2f}s] action_result received — SUCCESS",
+                                file=sys.stderr,
+                            )
                             # Report completion
                             if ctx:
                                 try:
@@ -645,7 +658,10 @@ def register_action_tools(
                         if msg_data.get("op") == "action_feedback":
                             feedback_count += 1
                             last_feedback = msg_data
-
+                            print(
+                                f"[Action t+{time.time()-_t0:.2f}s] feedback #{feedback_count}: {msg_data.get('values', {})}",
+                                file=sys.stderr,
+                            )
                             # Report feedback progress
                             if ctx:
                                 try:
@@ -666,6 +682,10 @@ def register_action_tools(
                 await asyncio.sleep(0.1)
 
             # Timeout - return last feedback if available
+            print(
+                f"[Action t+{time.time()-_t0:.2f}s] outer {timeout}s budget exhausted — TIMEOUT",
+                file=sys.stderr,
+            )
             if ctx and feedback_count > 0:
                 try:
                     await ctx.report_progress(

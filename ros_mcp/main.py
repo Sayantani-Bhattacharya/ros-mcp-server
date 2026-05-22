@@ -72,6 +72,21 @@ Examples:
     return parser.parse_args()
 
 
+class _TeeStream:
+    """Write to multiple streams simultaneously (used to tee stderr to a log file)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
 def main():
     """Main entry point for the MCP server console script."""
     # Parse command line arguments
@@ -83,7 +98,10 @@ def main():
     mcp_port = args.port
 
     if mcp_transport == "stdio":
-        # stdio doesn't need host/port
+        # stdio subprocess: stderr is captured by the MCP host, not the terminal.
+        # Tee it to server_debug.log so the user can tail -f it.
+        _log = open("server_debug.log", "w", buffering=1)
+        sys.stderr = _TeeStream(sys.__stderr__, _log)
         mcp.run(transport="stdio")
 
     elif mcp_transport in {"http", "streamable-http"}:
